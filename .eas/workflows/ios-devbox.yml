@@ -1,7 +1,5 @@
 # A macOS worker that stays up so you (or an agent) can SSH in and rebuild the
-# iOS app with Xcode. See README.md, or start it with:
-#
-#   ./scripts/devbox.sh start
+# iOS app with Xcode. Start it with ./scripts/devbox.sh start. See README.md.
 name: iOS devbox
 
 on:
@@ -10,16 +8,22 @@ on:
       ssh_public_key:
         type: string
         required: true
-        description: Base64-encoded OpenSSH public key that may log in to the worker.
+        description: OpenSSH public key that may log in to the worker.
       minutes:
         type: number
-        description: How long to keep the worker up. Touch ~/devbox-done to end earlier.
-        default: 90
+        description: Maximum session length in minutes, setup included.
+        default: 60
+      idle_minutes:
+        type: number
+        description: End the session after this many minutes with no SSH connection.
+        default: 15
 
 jobs:
   devbox:
     name: iOS devbox
     runs_on: macos-large
+    # Custom jobs default to the production environment and its variables.
+    environment: development
     env:
       SSH_PUBLIC_KEY: ${{ inputs.ssh_public_key }}
     steps:
@@ -29,18 +33,26 @@ jobs:
       # (no account needed) exposes it; clients connect with
       # `cloudflared access ssh`. Only the key from the input can log in.
       - name: Start SSH
-        id: ssh
         run: |
-          dir="$HOME/.devbox-ssh"
+          dir="$HOME/.devbox"
           mkdir -p "$dir" ~/.ssh && chmod 700 ~/.ssh
-          echo "$SSH_PUBLIC_KEY" | base64 -d > ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys
+          echo $(( $(date +%s) + ${{ inputs.minutes }} * 60 )) > "$dir/deadline"
+          ln -sfn "$PWD" ~/project
+
+          printf '%s\n' "$SSH_PUBLIC_KEY" > ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys
           if ! ssh-keygen -lf ~/.ssh/authorized_keys; then
-            echo "The ssh_public_key input is not a base64-encoded OpenSSH public key. Received: $SSH_PUBLIC_KEY"
+            echo "The ssh_public_key input is not an OpenSSH public key. Received: $SSH_PUBLIC_KEY"
             exit 1
           fi
           ssh-keygen -q -t ed25519 -N '' -f "$dir/host_key"
-          # SSH sessions start with a bare environment. Give them the job's PATH and toolchain variables.
-          env | grep -E '^[A-Za-z_][A-Za-z0-9_]*=' | grep -vE '^(PWD|OLDPWD|SHLVL|_|SSH_PUBLIC_KEY)=' > ~/.ssh/environment
+
+          # SSH sessions get only the toolchain variables, not the job's EAS
+          # variables or its EXPO_TOKEN.
+          echo "Job environment variables: $(env | cut -d= -f1 | sort | tr '\n' ' ')"
+          env | grep -E '^(PATH|LANG|LC_[A-Z]+|DEVELOPER_DIR|NVM_[A-Z_]+|GEM_[A-Z_]+|RUBY[A-Z_]*|BUNDLE_[A-Z_]+)=' > ~/.ssh/environment
+          chmod 600 ~/.ssh/environment
+          echo "SSH session variables: $(cut -d= -f1 ~/.ssh/environment | tr '\n' ' ')"
+
           cat > "$dir/sshd_config" <<EOF
           Port 2222
           ListenAddress 127.0.0.1
@@ -72,51 +84,99 @@ jobs:
             exit 1
           fi
 
-          curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-arm64.tgz | tar -xz -C "$dir"
+          curl -fsSL -o "$dir/cloudflared.tgz" \
+            https://github.com/cloudflare/cloudflared/releases/download/2026.10.3/cloudflared-darwin-arm64.tgz
+          echo "1165d14b6f6360a3b8c283d7d1100024d6ec7cd9bc9e32519e96150645f3ec55  $dir/cloudflared.tgz" | shasum -a 256 -c -
+          tar -xzf "$dir/cloudflared.tgz" -C "$dir"
+
+          # The keep-alive step reruns this if the tunnel exits. A new tunnel gets a new host.
+          cat > "$dir/tunnel.sh" <<'EOF'
+          #!/bin/bash
+          dir="$HOME/.devbox"
           "$dir/cloudflared" tunnel --no-autoupdate --protocol http2 --url ssh://localhost:2222 > "$dir/cloudflared.log" 2>&1 &
+          echo $! > "$dir/cloudflared.pid"
           for _ in $(seq 60); do
             host=$(grep -oE '[a-z0-9-]+\.trycloudflare\.com' "$dir/cloudflared.log" | head -1 || true)
-            [ -n "$host" ] && break
+            if [ -n "$host" ]; then
+              echo "DEVBOX_SSH_HOST=$host"
+              exit 0
+            fi
             sleep 2
           done
-          if [ -z "$host" ]; then
-            cat "$dir/cloudflared.log"
-            echo "The Cloudflare tunnel did not start. Re-run the workflow."
-            exit 1
-          fi
-          echo "DEVBOX_SSH_HOST=$host"
+          cat "$dir/cloudflared.log"
+          echo "The Cloudflare tunnel did not start."
+          exit 1
+          EOF
+          chmod +x "$dir/tunnel.sh"
+          "$dir/tunnel.sh"
           echo "DEVBOX_SSH_USER=$(whoami)"
-          set-output host "$host"
+          echo "DEVBOX_SSH_HOSTKEY=$(cut -d' ' -f1,2 "$dir/host_key.pub")"
 
       - uses: eas/install_node_modules
 
       - name: Prebuild and install pods
         run: |
-          npx expo prebuild --platform ios --no-install
+          if [ -d ios ]; then
+            echo "Using the committed ios directory."
+          else
+            npx expo prebuild --platform ios --no-install
+            touch ~/.devbox/cng
+          fi
           cd ios && pod install
 
       - name: Boot simulator
         run: |
           udid=$(xcrun simctl list devices available --json | node -e '
             const { devices } = JSON.parse(require("fs").readFileSync(0, "utf8"));
-            const iphones = Object.keys(devices).filter((r) => r.includes("iOS")).sort().reverse()
-              .flatMap((r) => devices[r]).filter((d) => d.name.startsWith("iPhone"));
+            const version = (runtime) => (runtime.match(/iOS-(\d+)-(\d+)/) ?? [0, 0, 0]).slice(1).map(Number);
+            const iphones = Object.keys(devices)
+              .filter((r) => r.includes("iOS"))
+              .sort((a, b) => version(b)[0] - version(a)[0] || version(b)[1] - version(a)[1])
+              .flatMap((r) => devices[r])
+              .filter((d) => d.name.startsWith("iPhone"));
             const d = iphones.find((d) => /^iPhone \d+ Pro$/.test(d.name)) ?? iphones[0];
             console.log(d.udid);')
           xcrun simctl boot "$udid"
           xcrun simctl bootstatus "$udid" -b
-          echo "$udid" > ~/.devbox-sim
+          echo "$udid" > ~/.devbox/sim
           xcrun simctl list devices booted
 
       - name: Keep the worker up
         run: |
-          ln -sfn "$PWD" ~/project
-          # EAS sets CI=true, which makes Metro ignore file changes.
-          env -u CI npx expo start --localhost > ~/metro.log 2>&1 < /dev/null &
-          ./scripts/devbox-build.sh || echo "The first build failed. Connect and run ./scripts/devbox-build.sh to see why."
-          touch ~/devbox-ready
-          deadline=$(( $(date +%s) + ${{ inputs.minutes }} * 60 ))
-          echo "Devbox ready at ~/project. Touch ~/devbox-done to end the job."
-          while [ ! -f ~/devbox-done ] && [ "$(date +%s)" -lt "$deadline" ]; do
+          dir="$HOME/.devbox"
+          start_metro() {
+            # EAS sets CI=true, which makes Metro ignore file changes.
+            env -u CI npx expo start --localhost > "$dir/metro.log" 2>&1 < /dev/null &
+          }
+          start_metro
+          ./scripts/devbox-build.sh || echo "The first build failed. Run ./scripts/devbox.sh build to see why."
+          touch "$dir/ready"
+          echo "Devbox ready at ~/project."
+
+          deadline=$(cat "$dir/deadline")
+          idle_limit=$(( ${{ inputs.idle_minutes }} * 60 ))
+          last_active=$(date +%s)
+          while [ "$(date +%s)" -lt "$deadline" ]; do
             sleep 20
+            now=$(date +%s)
+            if netstat -an -p tcp | grep -q '127\.0\.0\.1\.2222 .*ESTABLISHED'; then
+              last_active=$now
+            elif [ $(( now - last_active )) -ge "$idle_limit" ]; then
+              echo "No SSH connection for ${{ inputs.idle_minutes }} minutes. Ending the session."
+              exit 0
+            fi
+            if ! kill -0 "$(cat "$dir/cloudflared.pid")" 2> /dev/null; then
+              echo "The tunnel exited. Starting a new one."
+              "$dir/tunnel.sh" || true
+            fi
+            # Two misses in a row, so a Metro that is still starting is left alone.
+            if curl -sf http://localhost:8081/status > /dev/null; then
+              metro_misses=0
+            elif [ $(( metro_misses = ${metro_misses:-0} + 1 )) -ge 2 ]; then
+              echo "Metro is not responding. Restarting it."
+              pkill -f "expo start" || true
+              start_metro
+              metro_misses=0
+            fi
           done
+          echo "Reached the ${{ inputs.minutes }}-minute limit. Ending the session."

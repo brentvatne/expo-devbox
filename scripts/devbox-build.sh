@@ -1,43 +1,114 @@
 #!/usr/bin/env bash
-# Builds the iOS app with Xcode, installs it on the booted simulator, launches it,
-# and saves a screenshot to build/screenshot.png. Runs on the devbox worker.
+# Builds the iOS app with Xcode, installs it on the devbox simulator, launches it,
+# and prints its logs. Runs on the devbox worker. Exits non-zero when the build
+# fails, the app is not running after launch, or devbox.env's checks fail.
 #
-#   ./scripts/devbox-build.sh          incremental build
-#   ./scripts/devbox-build.sh --pods   run `pod install` first (after adding or
-#                                      removing native files, or editing a podspec)
+#   devbox-build.sh             incremental build
+#   devbox-build.sh --pods      run `pod install` first (after adding or removing
+#                               native files, or editing a podspec)
+#   devbox-build.sh --prebuild  install dependencies, run `expo prebuild` and
+#                               `pod install` first (after changing package.json,
+#                               app config or config plugins)
 set -euo pipefail
 cd "$(dirname "$0")/.."
-mkdir -p build
-
-if [[ "${1:-}" == "--pods" ]]; then
-  (cd ios && pod install > ../build/pods.log 2>&1) || { tail -40 build/pods.log; exit 1; }
+state="$HOME/.devbox"
+if [[ -f devbox.env ]]; then
+  source devbox.env
 fi
 
+case "${1:-}" in
+  --prebuild)
+    if [[ -f bun.lock || -f bun.lockb ]]; then
+      bun install
+    elif [[ -f pnpm-lock.yaml ]]; then
+      pnpm install
+    elif [[ -f yarn.lock ]]; then
+      yarn install
+    else
+      npm install
+    fi
+    if [[ -f "$state/cng" ]]; then
+      npx expo prebuild --platform ios --no-install
+    fi
+    (cd ios && pod install)
+    ;;
+  --pods)
+    (cd ios && pod install)
+    ;;
+esac
+
 workspace=$(ls -d ios/*.xcworkspace | head -1)
-scheme=$(basename "$workspace" .xcworkspace)
-bundle_id=$(node -p "require('./app.json').expo.ios.bundleIdentifier")
-udid=$(cat ~/.devbox-sim)
-derived=build/DerivedData
+scheme=${DEVBOX_SCHEME:-$(basename "$workspace" .xcworkspace)}
+udid=$(cat "$state/sim")
+derived="$state/DerivedData"
+build_log="$state/xcodebuild.log"
+rm -f "$state/screenshot.png"
 
 start=$(date +%s)
 if ! xcodebuild -workspace "$workspace" -scheme "$scheme" -configuration Debug \
   -sdk iphonesimulator -destination "platform=iOS Simulator,id=$udid" \
-  -derivedDataPath "$derived" build > build/xcodebuild.log 2>&1; then
-  grep -E "(error|fatal error):" build/xcodebuild.log | sort -u | head -40
-  echo "BUILD FAILED after $(( $(date +%s) - start ))s. Full log: build/xcodebuild.log"
+  -derivedDataPath "$derived" build > "$build_log" 2>&1; then
+  if ! grep -E "(error|fatal error):" "$build_log" | sort -u | head -40; then
+    tail -30 "$build_log"
+  fi
+  echo "BUILD FAILED after $(( $(date +%s) - start ))s. Full log: $build_log"
   exit 1
 fi
 echo "BUILD SUCCEEDED in $(( $(date +%s) - start ))s"
 
 if ! curl -sf http://localhost:8081/status > /dev/null; then
-  echo "Metro is not running. Start it with: (env -u CI npx expo start --localhost > ~/metro.log 2>&1 < /dev/null &)"
+  echo "Metro is not running. The worker restarts it within a minute; run the build again then."
+  exit 1
 fi
 
-log_start=$(( $(wc -l < ~/metro.log 2> /dev/null || echo 0) + 1 ))
-xcrun simctl terminate "$udid" "$bundle_id" 2> /dev/null || true
-xcrun simctl install "$udid" "$derived/Build/Products/Debug-iphonesimulator/$scheme.app"
-xcrun simctl launch "$udid" "$bundle_id" > /dev/null
-sleep "${SCREENSHOT_DELAY:-8}"
-xcrun simctl io "$udid" screenshot build/screenshot.png > /dev/null 2>&1
-echo "Launched $bundle_id. Screenshot: build/screenshot.png. App console output from this launch:"
-tail -n +"$log_start" ~/metro.log | grep -a -E '^ (LOG|WARN|ERROR) ' || echo "(none)"
+app=$(find "$derived/Build/Products/Debug-iphonesimulator" -maxdepth 1 -name '*.app' | head -1)
+bundle_id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Info.plist")
+executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Info.plist")
+metro_log="$state/metro.log"
+native_log="$state/native.log"
+log_start=$(( $(wc -l < "$metro_log") + 1 ))
+
+xcrun simctl install "$udid" "$app"
+xcrun simctl spawn "$udid" log stream --style compact \
+  --predicate "process == \"$executable\" AND NOT subsystem BEGINSWITH \"com.apple\"" > "$native_log" 2>&1 &
+log_stream=$!
+xcrun simctl launch --terminate-running-process "$udid" "$bundle_id" > /dev/null
+
+app_output() { tail -n +"$log_start" "$metro_log" | grep -a -E '^ (LOG|WARN|ERROR) ' || true; }
+status=0
+if [[ -n "${DEVBOX_WAIT_FOR:-}" ]]; then
+  for _ in $(seq "${DEVBOX_WAIT_SECONDS:-60}"); do
+    grep -q -E "$DEVBOX_WAIT_FOR" <<< "$(app_output)" && break
+    sleep 1
+  done
+else
+  sleep "${DEVBOX_WAIT_SECONDS:-8}"
+fi
+xcrun simctl io "$udid" screenshot "$state/screenshot.png" > /dev/null 2>&1 || echo "Could not take a screenshot."
+kill "$log_stream" 2> /dev/null || true
+
+echo "App console output from this launch:"
+output=$(app_output)
+echo "${output:-(none)}"
+echo "Native log from this launch (Apple frameworks excluded):"
+native=$(grep -v -E '^(Filtering the log data|Timestamp )' "$native_log" | tail -40 || true)
+echo "${native:-(none)}"
+
+if ! xcrun simctl spawn "$udid" launchctl list | grep -q "UIKitApplication:$bundle_id"; then
+  echo "The app is not running. It may have crashed at launch."
+  report=$(ls -t "$HOME/Library/Logs/DiagnosticReports/$executable"*.ips 2> /dev/null | head -1 || true)
+  if [[ -n "$report" ]]; then
+    echo "Crash report $report:"
+    head -60 "$report"
+  fi
+  status=1
+fi
+if [[ -n "${DEVBOX_WAIT_FOR:-}" ]] && ! grep -q -E "$DEVBOX_WAIT_FOR" <<< "$output"; then
+  echo "The app did not log a line matching DEVBOX_WAIT_FOR ($DEVBOX_WAIT_FOR) within ${DEVBOX_WAIT_SECONDS:-60}s."
+  status=1
+fi
+if [[ -n "${DEVBOX_FAIL_ON:-}" ]] && grep -q -E "$DEVBOX_FAIL_ON" <<< "$output"; then
+  echo "The app logged a line matching DEVBOX_FAIL_ON ($DEVBOX_FAIL_ON)."
+  status=1
+fi
+exit $status
