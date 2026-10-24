@@ -1,13 +1,14 @@
 {
   "expo": {
     "name": "eas-ssh-native-iter",
-    "slug": "eas-ssh-native-iter",
+    "slug": "eas-sim-workflow-repro",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "dev.expo.easshnativeiter"
     },
     "android": {
       "adaptiveIcon": {
@@ -20,6 +21,12 @@
     },
     "web": {
       "favicon": "./assets/favicon.png"
+    },
+    "owner": "brents",
+    "extra": {
+      "eas": {
+        "projectId": "85afe629-6b50-44d9-bb29-339ce571a109"
+      }
     }
   }
 }

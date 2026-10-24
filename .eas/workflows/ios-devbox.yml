@@ -1,0 +1,122 @@
+# A macOS worker that stays up so you (or an agent) can SSH in and rebuild the
+# iOS app with Xcode. See README.md, or start it with:
+#
+#   ./scripts/devbox.sh start
+name: iOS devbox
+
+on:
+  workflow_dispatch:
+    inputs:
+      ssh_public_key:
+        type: string
+        required: true
+        description: Base64-encoded OpenSSH public key that may log in to the worker.
+      minutes:
+        type: number
+        description: How long to keep the worker up. Touch ~/devbox-done to end earlier.
+        default: 90
+
+jobs:
+  devbox:
+    name: iOS devbox
+    runs_on: macos-large
+    env:
+      SSH_PUBLIC_KEY: ${{ inputs.ssh_public_key }}
+    steps:
+      - uses: eas/checkout
+
+      # sshd runs as the build user on localhost only. A Cloudflare quick tunnel
+      # (no account needed) exposes it; clients connect with
+      # `cloudflared access ssh`. Only the key from the input can log in.
+      - name: Start SSH
+        id: ssh
+        run: |
+          dir="$HOME/.devbox-ssh"
+          mkdir -p "$dir" ~/.ssh && chmod 700 ~/.ssh
+          echo "$SSH_PUBLIC_KEY" | base64 -d > ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys
+          if ! ssh-keygen -lf ~/.ssh/authorized_keys; then
+            echo "The ssh_public_key input is not a base64-encoded OpenSSH public key. Received: $SSH_PUBLIC_KEY"
+            exit 1
+          fi
+          ssh-keygen -q -t ed25519 -N '' -f "$dir/host_key"
+          # SSH sessions start with a bare environment. Give them the job's PATH and toolchain variables.
+          env | grep -E '^[A-Za-z_][A-Za-z0-9_]*=' | grep -vE '^(PWD|OLDPWD|SHLVL|_|SSH_PUBLIC_KEY)=' > ~/.ssh/environment
+          cat > "$dir/sshd_config" <<EOF
+          Port 2222
+          ListenAddress 127.0.0.1
+          HostKey $dir/host_key
+          PidFile $dir/sshd.pid
+          AuthorizedKeysFile .ssh/authorized_keys
+          PasswordAuthentication no
+          KbdInteractiveAuthentication no
+          UsePAM no
+          StrictModes no
+          PermitUserEnvironment yes
+          Subsystem sftp /usr/libexec/sftp-server
+          LogLevel VERBOSE
+          EOF
+          /usr/sbin/sshd -f "$dir/sshd_config" -E "$dir/sshd.log"
+
+          # Log in once with a throwaway key so an sshd problem fails here, with its log, instead of at the client.
+          ssh-keygen -q -t ed25519 -N '' -f "$dir/selftest_key"
+          cp ~/.ssh/authorized_keys "$dir/authorized_keys.orig"
+          cat "$dir/selftest_key.pub" >> ~/.ssh/authorized_keys
+          if ssh -p 2222 -i "$dir/selftest_key" -o IdentitiesOnly=yes -o BatchMode=yes \
+            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null 127.0.0.1 'echo SSH self-test passed'; then
+            selftest=ok
+          fi
+          cp "$dir/authorized_keys.orig" ~/.ssh/authorized_keys
+          if [ "${selftest:-}" != ok ]; then
+            echo "SSH self-test failed. sshd log:"
+            cat "$dir/sshd.log"
+            exit 1
+          fi
+
+          curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-arm64.tgz | tar -xz -C "$dir"
+          "$dir/cloudflared" tunnel --no-autoupdate --protocol http2 --url ssh://localhost:2222 > "$dir/cloudflared.log" 2>&1 &
+          for _ in $(seq 60); do
+            host=$(grep -oE '[a-z0-9-]+\.trycloudflare\.com' "$dir/cloudflared.log" | head -1 || true)
+            [ -n "$host" ] && break
+            sleep 2
+          done
+          if [ -z "$host" ]; then
+            cat "$dir/cloudflared.log"
+            echo "The Cloudflare tunnel did not start. Re-run the workflow."
+            exit 1
+          fi
+          echo "DEVBOX_SSH_HOST=$host"
+          echo "DEVBOX_SSH_USER=$(whoami)"
+          set-output host "$host"
+
+      - uses: eas/install_node_modules
+
+      - name: Prebuild and install pods
+        run: |
+          npx expo prebuild --platform ios --no-install
+          cd ios && pod install
+
+      - name: Boot simulator
+        run: |
+          udid=$(xcrun simctl list devices available --json | node -e '
+            const { devices } = JSON.parse(require("fs").readFileSync(0, "utf8"));
+            const iphones = Object.keys(devices).filter((r) => r.includes("iOS")).sort().reverse()
+              .flatMap((r) => devices[r]).filter((d) => d.name.startsWith("iPhone"));
+            const d = iphones.find((d) => /^iPhone \d+ Pro$/.test(d.name)) ?? iphones[0];
+            console.log(d.udid);')
+          xcrun simctl boot "$udid"
+          xcrun simctl bootstatus "$udid" -b
+          echo "$udid" > ~/.devbox-sim
+          xcrun simctl list devices booted
+
+      - name: Keep the worker up
+        run: |
+          ln -sfn "$PWD" ~/project
+          # EAS sets CI=true, which makes Metro ignore file changes.
+          env -u CI npx expo start --localhost > ~/metro.log 2>&1 < /dev/null &
+          ./scripts/devbox-build.sh || echo "The first build failed. Connect and run ./scripts/devbox-build.sh to see why."
+          touch ~/devbox-ready
+          deadline=$(( $(date +%s) + ${{ inputs.minutes }} * 60 ))
+          echo "Devbox ready at ~/project. Touch ~/devbox-done to end the job."
+          while [ ! -f ~/devbox-done ] && [ "$(date +%s)" -lt "$deadline" ]; do
+            sleep 20
+          done
