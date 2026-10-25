@@ -1,6 +1,6 @@
 {
   "name": "expo-devbox",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Build and test an Expo app's native iOS code on an EAS macOS worker, from your terminal or a coding agent.",
   "type": "module",
   "bin": {
