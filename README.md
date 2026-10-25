@@ -4,7 +4,7 @@ Build and test your Expo app's native iOS code on an EAS macOS worker instead of
 
 It is for work that rebuilds native code over and over, such as an agent iterating on an [Expo module](https://docs.expo.dev/modules/overview/), when those rebuilds are too heavy for your machine.
 
-**iOS only for now.** Android can be added on an EAS Linux worker with the Android Emulator. If you want it, ask.
+**iOS only for now.** Android support, on an EAS Linux worker with the Android Emulator, will be added to this tool shortly.
 
 ```
 $ bunx expo-devbox build
@@ -128,7 +128,7 @@ Steps 1 and 2, and the idle shutdown in step 4, exist because EAS Workflows does
 
 ## Limits
 
-- iOS only. Android support can be added if someone needs it.
+- iOS only. Android support will be added shortly.
 - One app per project root. Monorepos with dependencies outside the app directory are not supported.
 - `build --prebuild` reinstalls dependencies with the package manager whose lockfile is present.
 - Private npm packages need their token as an EAS environment variable in the `development` environment.
