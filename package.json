@@ -1,23 +1,25 @@
 {
-  "name": "eas-ssh-native-iter",
-  "version": "1.0.0",
-  "main": "index.ts",
-  "dependencies": {
-    "expo": "~58.0.19",
-    "expo-status-bar": "~58.0.4",
-    "react": "19.3.0",
-    "react-native": "0.88.0"
+  "name": "expo-devbox",
+  "version": "0.1.0",
+  "description": "Build and test an Expo app's native iOS code on an EAS macOS worker, from your terminal or a coding agent.",
+  "type": "module",
+  "bin": {
+    "expo-devbox": "src/cli.ts"
   },
-  "devDependencies": {
-    "@types/react": "~19.3.0",
-    "expo-devbox": "file:packages/expo-devbox",
-    "typescript": "~6.0.3"
+  "files": [
+    "src",
+    "templates"
+  ],
+  "engines": {
+    "bun": ">=1.3"
   },
   "scripts": {
-    "start": "expo start",
-    "android": "expo start --android",
-    "ios": "expo start --ios",
-    "web": "expo start --web"
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
   },
-  "private": true
+  "devDependencies": {
+    "@types/bun": "^1.4.4",
+    "typescript": "^7.0.2"
+  },
+  "license": "MIT"
 }
