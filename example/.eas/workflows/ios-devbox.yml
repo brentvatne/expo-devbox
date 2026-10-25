@@ -139,8 +139,25 @@ jobs:
             console.log(d.udid);')
           xcrun simctl boot "$udid"
           xcrun simctl bootstatus "$udid" -b
-          echo "$udid" > ~/.devbox/sim
           xcrun simctl list devices booted
+
+          # Values that the commands in `expo-devbox help` use, set in every SSH
+          # session. Prebuild names the scheme, the app and its executable alike.
+          workspace=$(ls -d ios/*.xcworkspace | head -1)
+          scheme=$(basename "$workspace" .xcworkspace)
+          bundle_id=$(npx expo config --type public --json | node -p 'JSON.parse(require("fs").readFileSync(0, "utf8")).ios?.bundleIdentifier ?? ""')
+          derived="$HOME/.devbox/DerivedData"
+          cat >> ~/.ssh/environment <<EOF
+          DEVBOX_SIMULATOR=$udid
+          DEVBOX_WORKSPACE=$workspace
+          DEVBOX_SCHEME=$scheme
+          DEVBOX_DERIVED_DATA=$derived
+          DEVBOX_APP=$derived/Build/Products/Debug-iphonesimulator/$scheme.app
+          DEVBOX_BUNDLE_ID=$bundle_id
+          DEVBOX_EXECUTABLE=$scheme
+          DEVBOX_LOG_PREDICATE=process == "$scheme" AND (senderImagePath CONTAINS "/$scheme.app/" OR (senderImagePath ENDSWITH "/Foundation" AND NOT subsystem CONTAINS "."))
+          EOF
+          grep '^DEVBOX_' ~/.ssh/environment
 
       - name: Keep the worker up
         run: |
@@ -150,13 +167,11 @@ jobs:
             env -u CI npx expo start --localhost > "$dir/metro.log" 2>&1 < /dev/null &
           }
           start_metro
-          # The same xcodebuild arguments as `expo-devbox build`, so its first build is incremental.
-          workspace=$(ls -d ios/*.xcworkspace | head -1)
-          scheme=$(node -p 'try { require("./devbox.json").scheme || "" } catch { "" }')
-          xcodebuild -workspace "$workspace" -scheme "${scheme:-$(basename "$workspace" .xcworkspace)}" \
-            -configuration Debug -sdk iphonesimulator -destination "platform=iOS Simulator,id=$(cat "$dir/sim")" \
-            -derivedDataPath "$dir/DerivedData" build > "$dir/xcodebuild.log" 2>&1 \
-            || echo "The warm-up build failed. Run expo-devbox build to see why."
+          # The build command from `expo-devbox help`, so the first build there is incremental.
+          devbox() { grep "^$1=" ~/.ssh/environment | cut -d= -f2-; }
+          xcodebuild -quiet -workspace "$(devbox DEVBOX_WORKSPACE)" -scheme "$(devbox DEVBOX_SCHEME)" -configuration Debug \
+            -destination "id=$(devbox DEVBOX_SIMULATOR)" -derivedDataPath "$(devbox DEVBOX_DERIVED_DATA)" build \
+            > "$dir/warm-up-build.log" 2>&1 || echo "The warm-up build failed. Run the build command from expo-devbox help to see why."
           touch "$dir/ready"
           echo "Devbox ready at ~/project."
 

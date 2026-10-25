@@ -42,10 +42,11 @@ Docs: https://docs.expo.dev/eas/index.md
 
 ## Native iOS builds on EAS (expo-devbox)
 
-Compile and test native iOS code on an EAS macOS worker with `bunx expo-devbox`, not on this machine. Do not run `npx expo run:ios` or `xcodebuild` locally.
+`bunx expo-devbox` gives you a macOS EAS worker to build and test this app's native iOS code instead of this machine. Use it only when the user asks for it, for example "build this on the devbox". Otherwise, build and run the app as you normally would.
 
-1. Start a session once: `bunx expo-devbox start`. It bills EAS macOS minutes until `stop`, its time limit (60 minutes by default), or 15 minutes without a connection.
-2. After each change, run `bunx expo-devbox build`. Add `--pods` after adding or removing native source files or editing a podspec, and `--prebuild` after changing package.json, the app config or a config plugin.
-3. `build` syncs your files, compiles, launches the app on the worker's iOS Simulator, and prints the app's console and native logs. It exits non-zero on a compile error (with file and line), a crash at launch (with the crashing frames), or a failed check from devbox.json. Read the output, fix the code, and build again. The screenshot is `.devbox/screenshot.png`.
-4. `bunx expo-devbox ssh '<command>'` runs a command in the project directory on the worker, for example `xcrun simctl list devices booted`.
-5. When you are done, run `bunx expo-devbox stop`.
+When the user asks for it:
+
+1. Run `bunx expo-devbox help` and follow its "On the worker" section. It has the command for each step: build, install and launch, logs, crash reports and screenshots.
+2. Start a session with `bunx expo-devbox start`. It returns when the worker is ready, and EAS macOS minutes are billed until the session ends.
+3. After each change, run `bunx expo-devbox sync`, then the commands from the help with `bunx expo-devbox ssh '<command>'`.
+4. When the user is done with the devbox, run `bunx expo-devbox stop`.

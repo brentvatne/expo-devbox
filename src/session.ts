@@ -1,10 +1,10 @@
 /**
  * The session commands: start a devbox workflow run, connect to its worker
- * over SSH through the Cloudflare tunnel it opens, sync sources, build, and
- * stop it. Run from the project root.
+ * over SSH through the Cloudflare tunnel it opens, sync files, run commands,
+ * and stop it. Run from the app's root directory.
  */
 import { $ } from 'bun';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -15,8 +15,9 @@ const STATE = '.devbox';
 const SSH_CONFIG = join(STATE, 'ssh_config');
 const RUN_ID = join(STATE, 'run_id');
 const KEY = join(homedir(), '.ssh', 'eas_devbox');
-const WORKER_SCRIPT = join(import.meta.dir, 'worker-build.ts');
 const ACTIVE = new Set(['NEW', 'WAITING', 'IN_PROGRESS', 'ACTION_REQUIRED']);
+/** ssh's exit code when it could not connect, as opposed to the remote command's own code. */
+const SSH_FAILED = 255;
 
 /** An error whose message is meant for the person or agent running the command. */
 export class UserError extends Error {}
@@ -25,8 +26,6 @@ const fail = (message: string): never => {
 };
 const log = (message: string) => console.error(message);
 const sleep = (seconds: number) => Bun.sleep(seconds * 1000);
-/** Quotes a value for the worker's shell. */
-const quote = (value: string) => `'${value.replaceAll("'", `'\\''`)}'`;
 
 type Run = { status: string; jobs?: { id: string }[] };
 
@@ -43,7 +42,7 @@ async function viewRun(runId: string): Promise<Run | undefined> {
 async function requireActive(runId: string): Promise<Run | undefined> {
   const run = await viewRun(runId);
   if (run && !ACTIVE.has(run.status)) {
-    fail(`The devbox session ended with status ${run.status}. See: eas workflow:view ${runId}`);
+    fail(`The devbox session ended with status ${run.status}. Start a new one with: expo-devbox start`);
   }
   if (run?.status === 'ACTION_REQUIRED') {
     status('blocked', { kind: 'permission', msg: 'The devbox workflow run needs approval on expo.dev' });
@@ -57,12 +56,8 @@ function savedRun(): string {
 }
 
 function requireProject() {
-  if (!existsSync(WORKFLOW)) fail(`${WORKFLOW} is missing. Run expo-devbox init in the project root first.`);
+  if (!existsSync(WORKFLOW)) fail(`${WORKFLOW} is missing. Run expo-devbox init in the app's root directory first.`);
   mkdirSync(STATE, { recursive: true });
-}
-
-function ssh(remoteCommand: string) {
-  return $`ssh -F ${SSH_CONFIG} devbox ${remoteCommand}`;
 }
 
 /**
@@ -103,7 +98,7 @@ async function connect(runId: string): Promise<void> {
     }
     await sleep(10);
   }
-  fail(`Could not reach the worker for 15 minutes. See: eas workflow:view ${runId}`);
+  fail('Could not reach the worker for 15 minutes. See: expo-devbox joblog');
 }
 
 function writeSshConfig(host: string, user: string, hostKey: string) {
@@ -124,19 +119,30 @@ function writeSshConfig(host: string, user: string, hostKey: string) {
 `);
 }
 
-/** Waits for the worker to finish preparing the project. Reconnects if the worker is unreachable. */
+/**
+ * Reconnects first if the worker is unreachable, for example because its
+ * tunnel moved. A command is never run twice: if the connection drops while
+ * it runs, it may already have done its work.
+ */
+async function ensureConnected() {
+  const probe = await $`ssh -F ${SSH_CONFIG} devbox true`.quiet().nothrow();
+  if (probe.exitCode === SSH_FAILED) await connect(savedRun());
+}
+const droppedMessage = 'The connection to the worker dropped while the command ran. It may have finished on the worker; check before you run it again.';
+
+/** Waits for the worker to prepare the app: install, prebuild, pods, simulator, Metro and a first build. */
 async function waitUntilReady(runId: string) {
+  log('Waiting for the worker to prepare the app (about 3 minutes)...');
+  status('working', { msg: 'The EAS worker is preparing the app' });
   const deadline = Date.now() + 20 * 60_000;
   while (Date.now() < deadline) {
-    const result = await ssh('test -f ~/.devbox/ready').quiet().nothrow();
+    const result = await $`ssh -F ${SSH_CONFIG} devbox ${'test -f ~/.devbox/ready'}`.quiet().nothrow();
     if (result.exitCode === 0) return;
-    if (result.exitCode === 255) {
+    if (result.exitCode === SSH_FAILED) {
       await connect(runId);
       continue;
     }
     await requireActive(runId);
-    log('Waiting for the worker to finish preparing the project...');
-    status('working', { msg: 'The EAS worker is preparing the project' });
     await sleep(15);
   }
   fail('The worker is not ready after 20 minutes. See: expo-devbox joblog');
@@ -149,7 +155,7 @@ export async function start(args: string[]) {
     const previous = readFileSync(RUN_ID, 'utf8').trim();
     const run = await viewRun(previous);
     if (run && ACTIVE.has(run.status)) {
-      fail(`A devbox session is already running (run ${previous}). Use expo-devbox attach or expo-devbox stop.`);
+      fail(`A devbox session is already running (run ${previous}). Use it, or end it with: expo-devbox stop`);
     }
   }
   const [minutes = '60', idleMinutes = '15'] = args;
@@ -163,7 +169,7 @@ export async function start(args: string[]) {
   if (result.exitCode !== 0) fail(`eas workflow:run failed:\n${result.stderr.toString().trim()}`);
   const runId: string = JSON.parse(result.stdout.toString()).id;
   writeFileSync(RUN_ID, runId);
-  log(`Started run ${runId}: ${minutes} minutes at most, ending after ${idleMinutes} idle minutes.`);
+  log(`Started run ${runId}: ${minutes} minutes at most, ending after ${idleMinutes} minutes without an SSH connection.`);
 
   // Cancel the run if this command fails or is interrupted, so it does not bill with nobody connected.
   const cancel = () => $`eas workflow:cancel ${runId} --non-interactive`.quiet().nothrow();
@@ -176,6 +182,7 @@ export async function start(args: string[]) {
   process.once('SIGINT', onInterrupt);
   try {
     await connect(runId);
+    await waitUntilReady(runId);
   } catch (error) {
     log(`Cancelling run ${runId}.`);
     await cancel();
@@ -183,8 +190,8 @@ export async function start(args: string[]) {
   } finally {
     process.removeListener('SIGINT', onInterrupt);
   }
-  log(`The worker is still preparing the project. 'expo-devbox build' waits for it.`);
-  status('done', { msg: 'Connected to the EAS worker' });
+  console.log('The worker is ready. Run expo-devbox help and follow "On the worker" to build and run the app.');
+  status('done', { msg: 'The EAS worker is ready' });
 }
 
 export async function attach(args: string[]) {
@@ -192,7 +199,9 @@ export async function attach(args: string[]) {
   const runId = args[0] ?? savedRun();
   writeFileSync(RUN_ID, runId);
   await connect(runId);
-  status('done', { msg: 'Connected to the EAS worker' });
+  await waitUntilReady(runId);
+  console.log('The worker is ready.');
+  status('done', { msg: 'The EAS worker is ready' });
 }
 
 /**
@@ -209,40 +218,11 @@ export async function sync() {
     .split('\n').filter(Boolean).map(path => `/${path}`);
   const excludes = join(STATE, 'rsync-excludes');
   writeFileSync(excludes, [...gitignore, ...ignored].join('\n') + '\n');
-  await $`rsync -az --delete -e ${`ssh -F ${SSH_CONFIG}`} --exclude .git --exclude node_modules --exclude /.devbox \
-    --exclude /ios/Pods --exclude-from=${excludes} ./ devbox:project/`;
-}
-
-export async function build(args: string[]) {
-  requireProject();
-  const [option] = args;
-  if (option && option !== '--pods' && option !== '--prebuild') fail('Usage: expo-devbox build [--pods|--prebuild]');
-  const runId = savedRun();
-  status('working', { msg: 'Waiting for the EAS worker' });
-  await waitUntilReady(runId);
-  status('working', { msg: 'Syncing sources to the EAS worker' });
-  await sync();
-  await $`scp -q -F ${SSH_CONFIG} ${WORKER_SCRIPT} devbox:.devbox/worker-build.ts`;
-
-  status('working', { msg: option ? `Building on the EAS worker (${option.slice(2)})` : 'Building on the EAS worker' });
-  const screenshot = join(STATE, 'screenshot.png');
-  rmSync(screenshot, { force: true });
-  const result = await ssh(`cd ~/project && bun ~/.devbox/worker-build.ts ${option ?? ''}`).nothrow();
-  if ((await $`scp -q -F ${SSH_CONFIG} devbox:.devbox/screenshot.png ${screenshot}`.quiet().nothrow()).exitCode === 0) {
-    console.log(`Screenshot copied to ${screenshot}`);
-  }
-  const summary = result.stdout.toString().match(/BUILD (SUCCEEDED|FAILED)[^\n]*/)?.[0];
-  if (result.exitCode === 0) {
-    status('done', { msg: summary ?? 'Build succeeded' });
-  } else {
-    status('error', { msg: summary?.startsWith('BUILD FAILED') ? summary : 'The app failed its checks; see the output' });
-  }
-  process.exitCode = result.exitCode;
-}
-
-export async function logs(args: string[]) {
-  requireProject();
-  await ssh(`grep -a -E ${quote(args[0] ?? '.')} ~/.devbox/metro.log | tail -50`).nothrow();
+  await ensureConnected();
+  const { exitCode } = await $`rsync -az --delete -e ${`ssh -F ${SSH_CONFIG}`} \
+    --exclude .git --exclude node_modules --exclude /.devbox --exclude /ios/Pods --exclude-from=${excludes} \
+    ./ devbox:project/`.nothrow();
+  if (exitCode !== 0) fail(`rsync exited ${exitCode}. Run expo-devbox sync again; it only sends what changed.`);
 }
 
 export async function shell(args: string[]) {
@@ -253,13 +233,16 @@ export async function shell(args: string[]) {
     process.exitCode = await child.exited;
     return;
   }
-  process.exitCode = (await ssh(`cd ~/project && ${args.join(' ')}`).nothrow()).exitCode;
+  await ensureConnected();
+  const { exitCode } = await $`ssh -F ${SSH_CONFIG} devbox ${`cd ~/project && ${args.join(' ')}`}`.nothrow();
+  if (exitCode === SSH_FAILED) console.error(droppedMessage);
+  process.exitCode = exitCode;
 }
 
 export async function joblog() {
   requireProject();
   const jobId = (await viewRun(savedRun()))?.jobs?.[0]?.id;
-  if (!jobId) fail('Could not find the job of the devbox run. See: eas workflow:view ' + savedRun());
+  if (!jobId) fail(`Could not find the job of the devbox run. See: eas workflow:view ${savedRun()}`);
   await $`eas workflow:logs ${jobId} --non-interactive`.nothrow();
 }
 

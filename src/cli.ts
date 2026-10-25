@@ -1,30 +1,60 @@
 #!/usr/bin/env bun
 import { init } from './init';
 import { playIntro } from './intro';
-import { attach, build, joblog, logs, shell, start, stop, sync, UserError } from './session';
+import { attach, joblog, shell, start, stop, sync, UserError } from './session';
 import { status } from './status';
 
-const HELP = `Build and test an Expo app's native iOS code on an EAS macOS worker,
-from your terminal or a coding agent.
+const HELP = `A macOS EAS worker for building and testing an Expo app's native iOS code,
+for you or a coding agent. Run these in the app's root directory.
 
-Usage: expo-devbox <command>
+Session:
+  init [--force] [--no-agents]    add the devbox workflow to this app
+  start [minutes] [idle-minutes]  start a session and wait until the worker is ready (about 4 minutes).
+                                  It ends after [minutes] (default 60) or after [idle-minutes] without
+                                  an SSH connection (default 15). EAS macOS minutes are billed until then.
+  sync                            copy your files to the worker (what git would track; .gitignore applies)
+  ssh ['command']                 run a command in the app's directory on the worker, or open a shell
+  attach [run-id]                 reconnect to a running session
+  joblog                          print the workflow job's log
+  stop                            end the session and wait until EAS confirms it ended
 
-  init [--force] [--no-agents]      add the devbox workflow to this Expo app
-  start [minutes] [idle-minutes]    start a session (default 60 and 15); wait until SSH works
-  build [--pods|--prebuild]         sync, build with Xcode, launch, print logs, copy the screenshot
-  ssh [command]                     run a command in the project on the worker, or open a shell
-  logs [pattern]                    search the app's console output
-  sync                              copy local sources to the worker
-  attach [run-id]                   reconnect to a running session
-  joblog                            print the workflow job's log
-  stop                              cancel the session and wait until it has ended
+On the worker:
+  After each change, run expo-devbox sync, then the commands below with expo-devbox ssh '<command>'.
+  The DEVBOX_* variables are set in every SSH session.
+
+  Build. Prints errors with file and line, then ** BUILD SUCCEEDED ** or ** BUILD FAILED **.
+  The full log is ~/.devbox/build.log.
+    set -o pipefail; xcodebuild -workspace "$DEVBOX_WORKSPACE" -scheme "$DEVBOX_SCHEME" -configuration Debug -destination "id=$DEVBOX_SIMULATOR" -derivedDataPath "$DEVBOX_DERIVED_DATA" build 2>&1 | tee ~/.devbox/build.log | grep -E ": (fatal )?error:|\\*\\* BUILD" | sort -u
+
+  Install and launch the app on the simulator:
+    xcrun simctl install booted "$DEVBOX_APP" && xcrun simctl launch --terminate-running-process booted "$DEVBOX_BUNDLE_ID"
+
+  JavaScript console output and errors (Metro):
+    tail -n 50 ~/.devbox/metro.log
+
+  Native log (NSLog, and os_log or Logger output from the app's own code; last minute):
+    xcrun simctl spawn booted log show --last 1m --style compact --predicate "$DEVBOX_LOG_PREDICATE" 2>/dev/null
+
+  Check that the app is still running:
+    pgrep -lf "$DEVBOX_EXECUTABLE.app/$DEVBOX_EXECUTABLE" || echo "The app is not running."
+
+  If it crashed, the exception and crashing frames from the newest crash report:
+    tail -n +2 "$(ls -t ~/Library/Logs/DiagnosticReports/$DEVBOX_EXECUTABLE*.ips | head -1)" | jq "{exception, termination, frames: [.threads[] | select(.triggered) | .frames[:12][] | {symbol, sourceFile, sourceLine}]}"
+
+  Screenshot (then, on your machine: scp -F .devbox/ssh_config devbox:.devbox/screenshot.png .devbox/):
+    xcrun simctl io booted screenshot ~/.devbox/screenshot.png
+
+  After adding or removing native files, or editing a podspec:
+    cd ios && pod install
+
+  After changing package.json, the app config or a config plugin (use your package manager;
+  skip prebuild if you commit ios/):
+    bun install && npx expo prebuild --platform ios --no-install && cd ios && pod install
 
 Requires a logged-in eas-cli and cloudflared (brew install cloudflared).
 Docs: https://www.npmjs.com/package/expo-devbox`;
 
-const commands: Record<string, (args: string[]) => unknown> = {
-  init, start, build, ssh: shell, logs, sync, attach, joblog, stop,
-};
+const commands: Record<string, (args: string[]) => unknown> = { init, start, sync, ssh: shell, attach, joblog, stop };
 
 const [name, ...args] = process.argv.slice(2);
 if (!name || name === 'help' || name === '--help' || name === '-h') {
