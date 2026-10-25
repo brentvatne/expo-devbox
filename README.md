@@ -19,18 +19,6 @@ Set up expo-devbox (https://www.npmjs.com/package/expo-devbox) in this Expo app.
 
 **iOS only for now.** Android support, on an EAS Linux worker with the Android Emulator, will be added to this tool shortly.
 
-```
-$ bunx expo-devbox sync
-$ bunx expo-devbox ssh 'set -o pipefail; xcodebuild … build 2>&1 | tee ~/.devbox/build.log | grep -E ": (fatal )?error:|\*\* BUILD" | sort -u'
-** BUILD SUCCEEDED **
-$ bunx expo-devbox ssh 'tail -n 3 ~/.devbox/metro.log'
- LOG  [native-crypto] PASS sha384("abc"): cb00753f…
- LOG  [native-crypto] DONE 7/7 passed
-```
-
-> [!NOTE]
-> SSH support for EAS Workflows is coming soon (`eas workflow:run --ssh` and `eas workflow:ssh`). It will cover about half of what this tool does: the SSH server, the Cloudflare tunnel, finding the worker, and ending idle sessions. The other half stays: preparing the worker (prebuild, pods, simulator, Metro, a first build), syncing your files safely, the variables and commands for building and running the app, and the instructions for coding agents. When workflow SSH ships, `expo-devbox` will use it.
-
 ## Requirements
 
 - An Expo app linked to an EAS project (`eas init`), on a plan with macOS workflow minutes. A session holds one macOS concurrency slot and is billed for as long as it runs. Check your plan's price and job time limits.
@@ -64,6 +52,17 @@ bunx expo-devbox init
 ## On the worker
 
 After each change, run `expo-devbox sync`, then run these with `expo-devbox ssh '<command>'`. The `DEVBOX_*` variables are set in every SSH session.
+
+For example:
+
+```
+$ bunx expo-devbox sync
+$ bunx expo-devbox ssh 'set -o pipefail; xcodebuild … build 2>&1 | tee ~/.devbox/build.log | grep -E ": (fatal )?error:|\*\* BUILD" | sort -u'
+** BUILD SUCCEEDED **
+$ bunx expo-devbox ssh 'tail -n 3 ~/.devbox/metro.log'
+ LOG  [native-crypto] PASS sha384("abc"): cb00753f…
+ LOG  [native-crypto] DONE 7/7 passed
+```
 
 **Build.** Prints errors with file and line, then `** BUILD SUCCEEDED **` or `** BUILD FAILED **`, and exits non-zero on failure. The full log is `~/.devbox/build.log`. After the worker's first build, an incremental build takes a few seconds.
 
@@ -155,7 +154,8 @@ The workflow runs one custom job on `macos-large` in the `development` environme
 
 `sync` sends what git would track. Patterns from `.gitignore` are excluded, so local secrets such as `.env.local` stay local and files that the worker generated are not deleted. `.gitignore` lines that start with `!` are not supported.
 
-Steps 1 and 2, and the idle shutdown in step 4, exist because EAS Workflows does not offer SSH yet. Workflow SSH is coming soon and will replace them; see the note at the top.
+> [!NOTE]
+> SSH support for EAS Workflows is coming soon (`eas workflow:run --ssh` and `eas workflow:ssh`). It will cover about half of what this tool does: the SSH server, the Cloudflare tunnel, finding the worker, and ending idle sessions. The other half stays: preparing the worker (prebuild, pods, simulator, Metro, a first build), syncing your files safely, the variables and commands for building and running the app, and the instructions for coding agents. Steps 1 and 2, and the idle shutdown in step 4, exist because EAS Workflows does not offer SSH yet. When workflow SSH ships, `expo-devbox` will use it.
 
 ## Limits
 
