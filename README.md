@@ -4,6 +4,8 @@ Build and test your Expo app's native iOS code on an EAS macOS worker instead of
 
 It is for work that rebuilds native code over and over, such as an agent iterating on an [Expo module](https://docs.expo.dev/modules/overview/), when those rebuilds are too heavy for your machine.
 
+**iOS only for now.** Android can be added on an EAS Linux worker with the Android Emulator. If you want it, ask.
+
 ```
 $ bunx expo-devbox build
 BUILD SUCCEEDED in 5s
@@ -13,6 +15,23 @@ App console output from this launch:
 Native log from this launch (system libraries excluded):
 2026-10-24 16:59:04.278 Df myapp[6954:97f5] (Foundation) [native-crypto] module created
 Screenshot copied to .devbox/screenshot.png
+```
+
+> [!NOTE]
+> SSH support for EAS Workflows is coming soon (`eas workflow:run --ssh` and `eas workflow:ssh`). It will cover about half of what this tool does: the SSH server, the Cloudflare tunnel, finding the worker, and ending idle sessions. The other half stays: syncing your files, incremental builds, launching the app and checking its logs, crash reports, `devbox.json`, and the instructions for coding agents. When workflow SSH ships, `expo-devbox` will use it.
+
+## Set it up with your coding agent
+
+Paste this into your coding agent, in your Expo app:
+
+```text
+Set up expo-devbox (https://www.npmjs.com/package/expo-devbox) in this Expo app, so that you build and test native iOS code on an EAS macOS worker instead of this machine.
+
+1. Check the requirements: bun 1.3 or later, eas-cli logged in (`eas whoami`), and cloudflared (`brew install cloudflared` if it is missing). If the app has no EAS project ID in its app config, run `eas init`.
+2. Run `bunx expo-devbox init` in the app's root directory.
+3. Read the "Native iOS builds on EAS (expo-devbox)" section that init added to AGENTS.md or CLAUDE.md, and follow it from now on.
+4. If the app logs a line when it is ready or when a self-test passes or fails, set `waitFor` and `failOn` in devbox.json to regular expressions for those lines.
+5. Ask me before you run `bunx expo-devbox start`: a session bills EAS macOS minutes while it runs. Then run `bunx expo-devbox build`, tell me the result, and run `bunx expo-devbox stop` when we are done.
 ```
 
 ## Requirements
@@ -105,11 +124,11 @@ The workflow runs one custom job on `macos-large` in the `development` environme
 
 `sync` sends what git would track. Patterns from `.gitignore` are excluded, so local secrets such as `.env.local` stay local and files that the worker generated are not deleted. `.gitignore` lines that start with `!` are not supported.
 
-EAS has built-in workflow SSH (`eas workflow:run --ssh`) that is not available in production yet. When it is, it will replace the SSH and tunnel steps.
+Steps 1 and 2, and the idle shutdown in step 4, exist because EAS Workflows does not offer SSH yet. Workflow SSH is coming soon and will replace them; see the note at the top.
 
 ## Limits
 
-- iOS only.
+- iOS only. Android support can be added if someone needs it.
 - One app per project root. Monorepos with dependencies outside the app directory are not supported.
 - `build --prebuild` reinstalls dependencies with the package manager whose lockfile is present.
 - Private npm packages need their token as an EAS environment variable in the `development` environment.
