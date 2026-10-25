@@ -70,14 +70,14 @@ Several sessions in one directory help when two agents share a checkout. Each se
 
 ## On the worker
 
-After each change, run `expo-devbox sync`, then run these with `expo-devbox ssh '<command>'`. The `DEVBOX_*` variables are set in every SSH session. After the worker's first build, an incremental build takes a few seconds.
+After each change, run `expo-devbox sync`, then the commands the change needs with `expo-devbox ssh '<command>'`. A JavaScript change needs none: Metro sends it to the running app. A native change needs a build, then install and launch. The rest are for checking the result. The `DEVBOX_*` variables are set in every SSH session. After the worker's first build, an incremental build takes a few seconds.
 
 ```sh
-# Build. Prints errors with file and line, then ** BUILD SUCCEEDED ** or ** BUILD FAILED **, and exits
+# Build, after a native change. Prints errors with file and line, then ** BUILD SUCCEEDED ** or ** BUILD FAILED **, and exits
 # non-zero on failure. The full log is ~/.devbox/build.log.
 set -o pipefail; xcodebuild -workspace "$DEVBOX_WORKSPACE" -scheme "$DEVBOX_SCHEME" -configuration Debug -destination "id=$DEVBOX_SIMULATOR" -derivedDataPath "$DEVBOX_DERIVED_DATA" build 2>&1 | tee ~/.devbox/build.log | grep -E ": (fatal )?error:|\*\* BUILD" | sort -u
 
-# Install and launch the app on the simulator.
+# After a build, install and launch the app on the simulator.
 xcrun simctl install booted "$DEVBOX_APP" && xcrun simctl launch --terminate-running-process booted "$DEVBOX_BUNDLE_ID"
 
 # JavaScript console output and errors (Metro).
@@ -132,7 +132,7 @@ When the user asks for it:
 
 1. Run `bunx expo-devbox help` and follow its "On the worker" section. It has the command for each step: build, install and launch, logs, crash reports and screenshots.
 2. Start a session with `bunx expo-devbox start`. It returns when the worker is ready, and EAS macOS minutes are billed until the session ends.
-3. After each change, run `bunx expo-devbox sync`, then the commands from the help with `bunx expo-devbox ssh '<command>'`.
+3. After each change, run `bunx expo-devbox sync`, then the commands from the help that the change needs, with `bunx expo-devbox ssh '<command>'`.
 4. Commands use the session you started last in this directory. If another agent works in the same directory, pass your session's ID, which `start` prints, to every command: `bunx expo-devbox ssh --session <id> '<command>'`.
 5. When the user is done with the devbox, run `bunx expo-devbox stop`.
 ```

@@ -27,14 +27,16 @@ Sessions:
   EXPO_DEVBOX_SESSION=<id>. Any unique prefix of an ID works; expo-devbox sessions lists them.
 
 On the worker:
-  After each change, run expo-devbox sync, then the commands below with expo-devbox ssh '<command>'.
+  After each change, run expo-devbox sync, then the commands below that the change needs with
+  expo-devbox ssh '<command>'. A JavaScript change needs none: Metro sends it to the running app.
+  A native change needs a build, then install and launch. The rest are for checking the result.
   The DEVBOX_* variables are set in every SSH session.
 
-  Build. Prints errors with file and line, then ** BUILD SUCCEEDED ** or ** BUILD FAILED **.
-  The full log is ~/.devbox/build.log.
+  Build, after a native change. Prints errors with file and line, then ** BUILD SUCCEEDED ** or
+  ** BUILD FAILED **. The full log is ~/.devbox/build.log.
     set -o pipefail; xcodebuild -workspace "$DEVBOX_WORKSPACE" -scheme "$DEVBOX_SCHEME" -configuration Debug -destination "id=$DEVBOX_SIMULATOR" -derivedDataPath "$DEVBOX_DERIVED_DATA" build 2>&1 | tee ~/.devbox/build.log | grep -E ": (fatal )?error:|\\*\\* BUILD" | sort -u
 
-  Install and launch the app on the simulator:
+  After a build, install and launch the app on the simulator:
     xcrun simctl install booted "$DEVBOX_APP" && xcrun simctl launch --terminate-running-process booted "$DEVBOX_BUNDLE_ID"
 
   JavaScript console output and errors (Metro):
