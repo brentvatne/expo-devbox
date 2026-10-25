@@ -39,3 +39,13 @@ Docs: https://docs.expo.dev/eas/index.md
 - If `ios/` and `android/` directories do not exist, they are generated (Continuous Native Generation). Never create or edit them by hand — configure native behavior in `app.json` and config plugins.
 - Expo Go only includes its bundled native modules. After adding a library with native code, the app needs a development build: `npx expo run:ios|android` locally, or `eas build --profile development`.
 - Prefer recommended Expo modules over third-party libraries, and check your available skills before adding dependencies. Docs: https://docs.expo.dev/versions/latest/index.md
+
+## Native iOS builds on EAS (expo-devbox)
+
+Compile and test native iOS code on an EAS macOS worker with `bunx expo-devbox`, not on this machine. Do not run `npx expo run:ios` or `xcodebuild` locally.
+
+1. Start a session once: `bunx expo-devbox start`. It bills EAS macOS minutes until `stop`, its time limit (60 minutes by default), or 15 minutes without a connection.
+2. After each change, run `bunx expo-devbox build`. Add `--pods` after adding or removing native source files or editing a podspec, and `--prebuild` after changing package.json, the app config or a config plugin.
+3. `build` syncs your files, compiles, launches the app on the worker's iOS Simulator, and prints the app's console and native logs. It exits non-zero on a compile error (with file and line), a crash at launch (with the crashing frames), or a failed check from devbox.json. Read the output, fix the code, and build again. The screenshot is `.devbox/screenshot.png`.
+4. `bunx expo-devbox ssh '<command>'` runs a command in the project directory on the worker, for example `xcrun simctl list devices booted`.
+5. When you are done, run `bunx expo-devbox stop`.

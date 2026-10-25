@@ -1,0 +1,4 @@
+{
+  "waitFor": "\\[native-crypto\\] DONE",
+  "failOn": "\\[native-crypto\\] FAIL"
+}

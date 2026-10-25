@@ -1,5 +1,6 @@
-# A macOS worker that stays up so you (or an agent) can SSH in and rebuild the
-# iOS app with Xcode. Start it with ./scripts/devbox.sh start. See README.md.
+# A macOS worker that stays up so you, or a coding agent, can build and test the
+# iOS app with Xcode over SSH. Written by `expo-devbox init`; start a session
+# with `bunx expo-devbox start`. https://www.npmjs.com/package/expo-devbox
 name: iOS devbox
 
 on:
@@ -149,7 +150,13 @@ jobs:
             env -u CI npx expo start --localhost > "$dir/metro.log" 2>&1 < /dev/null &
           }
           start_metro
-          ./scripts/devbox-build.sh || echo "The first build failed. Run ./scripts/devbox.sh build to see why."
+          # The same xcodebuild arguments as `expo-devbox build`, so its first build is incremental.
+          workspace=$(ls -d ios/*.xcworkspace | head -1)
+          scheme=$(node -p 'try { require("./devbox.json").scheme || "" } catch { "" }')
+          xcodebuild -workspace "$workspace" -scheme "${scheme:-$(basename "$workspace" .xcworkspace)}" \
+            -configuration Debug -sdk iphonesimulator -destination "platform=iOS Simulator,id=$(cat "$dir/sim")" \
+            -derivedDataPath "$dir/DerivedData" build > "$dir/xcodebuild.log" 2>&1 \
+            || echo "The warm-up build failed. Run expo-devbox build to see why."
           touch "$dir/ready"
           echo "Devbox ready at ~/project."
 
