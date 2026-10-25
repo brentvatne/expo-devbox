@@ -47,9 +47,10 @@ remote() {
 
 # Reads the tunnel host, user and host key from the job log and writes an SSH
 # config for them. The last DEVBOX_SSH_HOST wins, because the worker starts a
-# new tunnel, with a new host, if the old one exits.
+# new tunnel, with a new host, if the old one exits. A host that does not
+# answer is skipped until a newer one appears in the log.
 connect() {
-  local run_id=$1 job_id logs host user hostkey
+  local run_id=$1 job_id logs host user hostkey dead_host=""
   echo "Waiting for the worker to open its tunnel (run $run_id)..." >&2
   for _ in $(seq 90); do
     fail_if_ended "$run_id"
@@ -59,7 +60,7 @@ connect() {
       host=$(grep -oE 'DEVBOX_SSH_HOST=[a-z0-9.-]+' <<< "$logs" | tail -1 | cut -d= -f2 || true)
       user=$(grep -oE 'DEVBOX_SSH_USER=[A-Za-z0-9_-]+' <<< "$logs" | tail -1 | cut -d= -f2 || true)
       hostkey=$(grep -oE 'DEVBOX_SSH_HOSTKEY=ssh-ed25519 [A-Za-z0-9+/=]+' <<< "$logs" | tail -1 | cut -d= -f2- || true)
-      if [[ -n "$host" && -n "$user" && -n "$hostkey" ]]; then
+      if [[ -n "$host" && -n "$user" && -n "$hostkey" && "$host" != "$dead_host" ]]; then
         echo "$host $hostkey" > "$state/known_hosts"
         cat > "$state/ssh_config" << EOF
 Host devbox
@@ -77,36 +78,40 @@ Host devbox
   ControlPersist 5m
 EOF
         # A new quick tunnel can take a few seconds to resolve in DNS.
-        for _ in $(seq 12); do
+        for _ in $(seq 8); do
           if ssh -F "$state/ssh_config" devbox true 2> "$state/ssh_error"; then
             echo "Connected to $user@$host." >&2
             return 0
           fi
           sleep 5
         done
-        echo "Could not connect to $user@$host:" >&2
-        cat "$state/ssh_error" >&2
-        exit 1
+        echo "$host does not answer ($(tail -1 "$state/ssh_error")). Waiting for the worker to open a new tunnel..." >&2
+        dead_host=$host
       fi
     fi
     sleep 10
   done
-  echo "The worker did not report an SSH host within 15 minutes. See: eas workflow:view $run_id" >&2
+  echo "Could not reach the worker for 15 minutes. See: eas workflow:view $run_id" >&2
   exit 1
 }
 
+# Waits for the worker's first build. Reconnects if the worker is unreachable,
+# for example after it replaced its tunnel.
 wait_until_ready() {
-  local run_id
+  local run_id status
   run_id=$(saved_run)
   for _ in $(seq 80); do
-    if ssh -F "$state/ssh_config" devbox 'test -f ~/.devbox/ready' 2> /dev/null; then
-      return 0
-    fi
+    status=0
+    ssh -F "$state/ssh_config" devbox 'test -f ~/.devbox/ready' 2> /dev/null || status=$?
+    case $status in
+      0) return 0 ;;
+      255) connect "$run_id"; continue ;;
+    esac
     fail_if_ended "$run_id"
     echo "Waiting for the worker to finish its first build..." >&2
     sleep 15
   done
-  echo "The worker is not ready after 20 minutes, or it is unreachable. If its tunnel restarted, run: $0 attach" >&2
+  echo "The worker is not ready after 20 minutes. See: $0 joblog" >&2
   exit 1
 }
 

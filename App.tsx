@@ -6,7 +6,7 @@ import NativeCrypto from './modules/native-crypto/src/NativeCryptoModule';
 
 type Result = { name: string; pass: boolean; detail: string };
 
-// Known-answer vectors: FIPS 180-2 for SHA-256 and SHA-512, and RFC 4231 test case 2 for HMAC-SHA256.
+// Known-answer vectors: FIPS 180-2 for SHA-256, SHA-384 and SHA-512, and RFC 4231 test case 2 for HMAC-SHA256.
 async function runTests(): Promise<Result[]> {
   const results: Result[] = [];
   const check = async (name: string, fn: () => unknown, expect: (v: any) => boolean) => {
@@ -22,6 +22,8 @@ async function runTests(): Promise<Result[]> {
     v === 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad');
   await check('sha256("")', () => NativeCrypto.sha256(''), (v) =>
     v === 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855');
+  await check('sha384("abc")', () => NativeCrypto.sha384('abc'), (v) =>
+    v === 'cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7');
   await check('sha512("abc")', () => NativeCrypto.sha512('abc'), (v) =>
     v === 'ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f');
   await check('hmacSha256Async (RFC 4231 #2)',

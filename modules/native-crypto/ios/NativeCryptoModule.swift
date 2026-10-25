@@ -6,8 +6,16 @@ public class NativeCryptoModule: Module {
   public func definition() -> ModuleDefinition {
     Name("NativeCrypto")
 
+    OnCreate {
+      NSLog("[native-crypto] module created")
+    }
+
     Function("sha256") { (message: String) -> String in
       return SHA256.hash(data: Data(message.utf8)).hexString
+    }
+
+    Function("sha384") { (message: String) -> String in
+      return SHA384.hash(data: Data(message.utf8)).hexString
     }
 
     Function("sha512") { (message: String) -> String in

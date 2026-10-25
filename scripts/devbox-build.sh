@@ -16,24 +16,36 @@ if [[ -f devbox.env ]]; then
   source devbox.env
 fi
 
+prepare_log="$state/prepare.log"
+prepare() {
+  echo "Running: $*"
+  if ! "$@" >> "$prepare_log" 2>&1; then
+    tail -30 "$prepare_log"
+    echo "FAILED: $*. Full log: $prepare_log"
+    exit 1
+  fi
+}
+pod_install() { (cd ios && pod install); }
+
+: > "$prepare_log"
 case "${1:-}" in
   --prebuild)
     if [[ -f bun.lock || -f bun.lockb ]]; then
-      bun install
+      prepare bun install
     elif [[ -f pnpm-lock.yaml ]]; then
-      pnpm install
+      prepare pnpm install
     elif [[ -f yarn.lock ]]; then
-      yarn install
+      prepare yarn install
     else
-      npm install
+      prepare npm install
     fi
     if [[ -f "$state/cng" ]]; then
-      npx expo prebuild --platform ios --no-install
+      prepare npx expo prebuild --platform ios --no-install
     fi
-    (cd ios && pod install)
+    prepare pod_install
     ;;
   --pods)
-    (cd ios && pod install)
+    prepare pod_install
     ;;
 esac
 
@@ -69,16 +81,23 @@ native_log="$state/native.log"
 log_start=$(( $(wc -l < "$metro_log") + 1 ))
 
 xcrun simctl install "$udid" "$app"
-xcrun simctl spawn "$udid" log stream --style compact \
-  --predicate "process == \"$executable\" AND NOT subsystem BEGINSWITH \"com.apple\"" > "$native_log" 2>&1 &
+# Messages logged by code inside the app bundle, plus NSLog (sent from
+# Foundation, with no subsystem); not the system libraries' own logging.
+# `subsystem == ""` never matches, so "no subsystem" is written as no dot.
+xcrun simctl spawn "$udid" log stream --style compact --predicate "process == \"$executable\" AND \
+(senderImagePath CONTAINS \"/$executable.app/\" OR (senderImagePath ENDSWITH \"/Foundation\" AND NOT subsystem CONTAINS \".\"))" \
+  > "$native_log" 2>&1 &
 log_stream=$!
 xcrun simctl launch --terminate-running-process "$udid" "$bundle_id" > /dev/null
 
 app_output() { tail -n +"$log_start" "$metro_log" | grep -a -E '^ (LOG|WARN|ERROR) ' || true; }
+# Simulator apps run as processes of the host.
+app_running() { pgrep -f "/$executable.app/$executable" > /dev/null; }
 status=0
 if [[ -n "${DEVBOX_WAIT_FOR:-}" ]]; then
-  for _ in $(seq "${DEVBOX_WAIT_SECONDS:-60}"); do
+  for i in $(seq "${DEVBOX_WAIT_SECONDS:-60}"); do
     grep -q -E "$DEVBOX_WAIT_FOR" <<< "$(app_output)" && break
+    (( i > 3 )) && ! app_running && break
     sleep 1
   done
 else
@@ -91,20 +110,29 @@ echo "App console output from this launch:"
 output=$(app_output)
 echo "${output:-(none)}"
 echo "Native log from this launch (Apple frameworks excluded):"
-native=$(grep -v -E '^(Filtering the log data|Timestamp )' "$native_log" | tail -40 || true)
+native=$(grep -v -E '^(Filtering the log data|Timestamp |getpwuid_r |Child process terminated)' "$native_log" | tail -40 || true)
 echo "${native:-(none)}"
 
-if ! xcrun simctl spawn "$udid" launchctl list | grep -q "UIKitApplication:$bundle_id"; then
+if ! app_running; then
   echo "The app is not running. It may have crashed at launch."
-  report=$(ls -t "$HOME/Library/Logs/DiagnosticReports/$executable"*.ips 2> /dev/null | head -1 || true)
+  report=$(find "$HOME/Library/Logs/DiagnosticReports" -name "$executable*.ips" -newer "$app/Info.plist" 2> /dev/null |
+    xargs ls -t 2> /dev/null | head -1 || true)
   if [[ -n "$report" ]]; then
     echo "Crash report $report:"
-    head -60 "$report"
+    # An .ips file is a JSON header line followed by the JSON report.
+    tail -n +2 "$report" | node -e '
+      const r = JSON.parse(require("fs").readFileSync(0, "utf8"));
+      console.log(`${r.exception?.type} (${r.exception?.signal}), ${r.termination?.indicator ?? ""}`);
+      const thread = r.threads?.find((t) => t.triggered);
+      for (const f of thread?.frames?.slice(0, 15) ?? []) {
+        const where = f.sourceFile ? ` (${f.sourceFile}:${f.sourceLine})` : "";
+        console.log(`  ${r.usedImages?.[f.imageIndex]?.name ?? "?"}  ${f.symbol ?? "?"}${where}`);
+      }' || head -40 "$report"
   fi
   status=1
 fi
 if [[ -n "${DEVBOX_WAIT_FOR:-}" ]] && ! grep -q -E "$DEVBOX_WAIT_FOR" <<< "$output"; then
-  echo "The app did not log a line matching DEVBOX_WAIT_FOR ($DEVBOX_WAIT_FOR) within ${DEVBOX_WAIT_SECONDS:-60}s."
+  echo "The app did not log a line matching DEVBOX_WAIT_FOR ($DEVBOX_WAIT_FOR)."
   status=1
 fi
 if [[ -n "${DEVBOX_FAIL_ON:-}" ]] && grep -q -E "$DEVBOX_FAIL_ON" <<< "$output"; then
