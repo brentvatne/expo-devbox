@@ -153,8 +153,7 @@ The workflow runs one custom job on `macos-large` in the `development` environme
 
 `sync` sends what git would track. Patterns from `.gitignore` are excluded, so local secrets such as `.env.local` stay local and files that the worker generated are not deleted. `.gitignore` lines that start with `!` are not supported.
 
-> [!NOTE]
-> SSH support for EAS Workflows is coming soon (`eas workflow:run --ssh` and `eas workflow:ssh`). It will cover about half of what this tool does: the SSH server, the Cloudflare tunnel, finding the worker, and ending idle sessions (steps 1 and 2, and the idle shutdown in step 4). The other half stays: preparing the worker, syncing your files safely, the variables and commands for building and running the app, and the instructions for coding agents. When workflow SSH ships, `expo-devbox` will use it.
+**Coming soon:** SSH support for EAS Workflows (`eas workflow:run --ssh` and `eas workflow:ssh`). It will cover about half of what this tool does: the SSH server, the Cloudflare tunnel, finding the worker, and ending idle sessions (steps 1 and 2, and the idle shutdown in step 4). The other half stays: preparing the worker, syncing your files safely, the variables and commands for building and running the app, and the instructions for coding agents. When workflow SSH ships, `expo-devbox` will use it.
 
 </details>
 
