@@ -1,6 +1,6 @@
 # expo-devbox
 
-A macOS EAS worker for building and testing your Expo app's native iOS code, for you or your coding agent, instead of your own machine. `expo-devbox start` brings up a worker that has your app prebuilt, its pods installed, an iOS Simulator booted, Metro running, and a first build done. Then you, or your agent, copy files over with `expo-devbox sync` and run commands on it with `expo-devbox ssh`.
+A macOS EAS worker for building and testing your Expo app's native iOS code, for you or your coding agent, instead of your own machine. `expo-devbox start` brings up a worker that has your app prebuilt, its pods installed, an iOS Simulator booted, Metro running, and a first build done. Then you, or your agent, copy files over with `expo-devbox sync`, run commands on it with `expo-devbox ssh`, and copy results back with `expo-devbox pull`.
 
 It is for work that rebuilds native code over and over, such as an agent iterating on an [Expo module](https://docs.expo.dev/modules/overview/), when those rebuilds are too heavy for your machine.
 
@@ -33,21 +33,35 @@ In the root of your app:
 bunx expo-devbox init
 ```
 
-`init` writes the workflow to `.eas/workflows/ios-devbox.yml` and adds `.devbox/` to `.gitignore`; the CLI keeps the session's run ID and SSH config there. It also adds a short section for coding agents to `AGENTS.md` or `CLAUDE.md`, or prints it if neither file exists (see [Coding agents](#coding-agents)).
+`init` writes the workflow to `.eas/workflows/ios-devbox.yml` and adds `.devbox/` to `.gitignore`; the CLI keeps each session's SSH config there. It also adds a short section for coding agents to `AGENTS.md` or `CLAUDE.md`, or prints it if neither file exists (see [Coding agents](#coding-agents)).
 
 ## Commands
 
 | Command | What it does |
 | --- | --- |
 | `init [--force] [--no-agents]` | Adds the devbox workflow to the app, as in [Set up](#set-up). `--force` replaces an existing workflow; `--no-agents` leaves `AGENTS.md` and `CLAUDE.md` alone. |
-| `start [minutes] [idle-minutes]` | Starts a session and waits until the worker is ready, about 4 minutes. The session ends after `minutes` (default 60) or after `idle-minutes` with no SSH connection (default 15). |
+| `start [minutes] [idle-minutes]` | Starts a new session, makes it the current one, and waits until its worker is ready, about 4 minutes. The session ends after `minutes` (default 60) or after `idle-minutes` with no SSH connection (default 15). |
 | `sync` | Copies your files to the worker: what git would track, so `.gitignore` applies. Run it after each change. |
 | `ssh ['command']` | Runs a command in the app's directory on the worker, or opens a shell. If the connection drops while the command runs, it exits 255 and does not run the command again. |
-| `attach [run-id]` | Reconnects to a running session. `sync` and `ssh` also reconnect on their own when the worker's tunnel has moved. |
-| `joblog` | Prints the workflow job's log. |
-| `stop` | Ends the session and waits until EAS confirms that it has ended. |
+| `pull <path> [local-path]` | Copies a file from the worker. A relative path is in the app's directory there. |
+| `sessions` | Lists this directory's sessions, newest first, and marks the current one. |
+| `attach [id]` | Reconnects to a session and makes it the current one. `sync`, `ssh` and `pull` also reconnect on their own when the worker's tunnel has moved. |
+| `joblog` | Prints the session's workflow job log. |
+| `stop [--all]` | Ends the session, or with `--all` every session in this directory, and waits until EAS confirms that it has ended. |
 
 `expo-devbox help` prints these commands and the steps in [On the worker](#on-the-worker).
+
+### Sessions
+
+Sessions work like Claude Code's. Each `start` begins a new session and makes it the current one, and the other commands use the current session, so with one session you never name it. To use another one, add `--session <id>` (or `-s <id>`) before the command's arguments, or set `EXPO_DEVBOX_SESSION=<id>`. Any unique prefix of the ID works, and `expo-devbox sessions` lists them:
+
+```
+$ bunx expo-devbox sessions
+* 01a170c2-0f3a  IN_PROGRESS     10/24/2026, 7:05:12 PM
+  01a170bb-d83c  IN_PROGRESS     10/24/2026, 6:58:40 PM
+```
+
+Several sessions in one directory are useful when two agents share a checkout, or to compare two runs side by side. Each session is its own worker, holds its own macOS concurrency slot and is billed separately. Separate directories, such as git worktrees, keep separate sessions too.
 
 ## On the worker
 
@@ -98,8 +112,8 @@ tail -n +2 "$(ls -t ~/Library/Logs/DiagnosticReports/$DEVBOX_EXECUTABLE*.ips | h
 **Screenshot**, then copy it to your machine (the second command runs locally):
 
 ```sh
-xcrun simctl io booted screenshot ~/.devbox/screenshot.png
-scp -F .devbox/ssh_config devbox:.devbox/screenshot.png .devbox/
+mkdir -p .devbox && xcrun simctl io booted screenshot .devbox/screenshot.png
+expo-devbox pull .devbox/screenshot.png .devbox/
 ```
 
 **After adding or removing native files, or editing a podspec:**
@@ -138,7 +152,8 @@ When the user asks for it:
 1. Run `bunx expo-devbox help` and follow its "On the worker" section. It has the command for each step: build, install and launch, logs, crash reports and screenshots.
 2. Start a session with `bunx expo-devbox start`. It returns when the worker is ready, and EAS macOS minutes are billed until the session ends.
 3. After each change, run `bunx expo-devbox sync`, then the commands from the help with `bunx expo-devbox ssh '<command>'`.
-4. When the user is done with the devbox, run `bunx expo-devbox stop`.
+4. Commands use the session you started last in this directory. If another agent works in the same directory, pass your session's ID, which `start` prints, to every command: `bunx expo-devbox ssh --session <id> '<command>'`.
+5. When the user is done with the devbox, run `bunx expo-devbox stop`.
 ```
 
 In a terminal that supports the [Program Status Protocol](https://mitchellh.com/writing/program-status-osc7501) (OSC 7501), such as Ghostty, `start`, `attach` and `stop` report their status: working, done, or blocked when the run needs approval on expo.dev; any command that fails reports an error. The CLI sends these reports only when its stderr is a terminal, so output that an agent captures never contains them.
@@ -148,7 +163,7 @@ In a terminal that supports the [Program Status Protocol](https://mitchellh.com/
 The workflow runs one custom job on `macos-large` in the `development` environment:
 
 1. **SSH.** It starts `sshd` as the build user on `127.0.0.1:2222`. Only the key `~/.ssh/eas_devbox`, created by `start`, can log in. SSH sessions get the toolchain variables (`PATH`, Ruby, nvm) and the `DEVBOX_*` variables, but not the job's EAS environment variables or its `EXPO_TOKEN`. The job itself still has them, and the SSH user is the job user, so do not give a session to someone who should not see the development environment.
-2. **Tunnel.** EAS workers accept no inbound connections, so the worker opens a pinned `cloudflared` [quick tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/trycloudflare/), and Cloudflare relays your connection to it. The job log prints the tunnel host and the worker's SSH host key; the CLI reads them with `eas workflow:logs` and pins the key. Quick tunnels have no uptime guarantee. If the tunnel exits, the worker opens a new one, and `sync` and `ssh` reconnect.
+2. **Tunnel.** EAS workers accept no inbound connections, so the worker opens a pinned `cloudflared` [quick tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/trycloudflare/), and Cloudflare relays your connection to it. The job log prints the tunnel host and the worker's SSH host key; the CLI reads them with `eas workflow:logs` and pins the key. Quick tunnels have no uptime guarantee. If the tunnel exits, the worker opens a new one, and `sync`, `ssh` and `pull` reconnect.
 3. **Preparation.** It runs `expo prebuild` (skipped when the project commits `ios/`) and `pod install`, and boots an iPhone simulator. It writes the `DEVBOX_*` variables for SSH sessions. It starts Metro with `CI` unset, because with `CI=true` Metro ignores file changes. Then it runs the build command above once, so that later builds are incremental.
 4. **Session.** The job stays up until `minutes` after it started, or until no SSH connection has been open for `idle-minutes`. It restarts Metro if Metro stops responding.
 
@@ -204,6 +219,7 @@ Before a release, run these checks in the example with the commands from [On the
 | Prebuild and pod install, then build | `** BUILD SUCCEEDED **` |
 | `.env.local` present, then `sync` | the file is not on the worker |
 | `expo-devbox ssh 'pkill -9 cloudflared'`, then `expo-devbox ssh 'true'` | the first exits 255 with the dropped-connection message and is not run again; the second reconnects on its own and exits 0 |
-| `stop` | `The devbox session is canceled.` |
+| `start` twice, then `sessions`, `ssh --session <first id> 'true'` and `stop --all` | two sessions listed, the newer one current; the command runs on the first; both sessions end |
+| `stop` | `The devbox session <id> is canceled.` |
 
 After you change `templates/ios-devbox.yml`, run `expo-devbox init --force --no-agents` in `example/` to update its workflow.

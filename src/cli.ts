@@ -1,22 +1,30 @@
 #!/usr/bin/env bun
 import { init } from './init';
 import { playIntro } from './intro';
-import { attach, joblog, shell, start, stop, sync, UserError } from './session';
+import { parseArgs } from './args';
+import { attach, joblog, pull, selectSession, sessions, shell, start, stop, sync, UserError } from './session';
 import { status } from './status';
 
 const HELP = `A macOS EAS worker for building and testing an Expo app's native iOS code,
 for you or a coding agent. Run these in the app's root directory.
 
-Session:
+Commands:
   init [--force] [--no-agents]    add the devbox workflow to this app
-  start [minutes] [idle-minutes]  start a session and wait until the worker is ready (about 4 minutes).
+  start [minutes] [idle-minutes]  start a new session and wait until its worker is ready (about 4 minutes).
                                   It ends after [minutes] (default 60) or after [idle-minutes] without
                                   an SSH connection (default 15). EAS macOS minutes are billed until then.
   sync                            copy your files to the worker (what git would track; .gitignore applies)
   ssh ['command']                 run a command in the app's directory on the worker, or open a shell
-  attach [run-id]                 reconnect to a running session
-  joblog                          print the workflow job's log
-  stop                            end the session and wait until EAS confirms it ended
+  pull <path> [local-path]        copy a file from the worker; a relative path is in the app's directory
+  sessions                        list this directory's sessions
+  attach [id]                     reconnect to a session and make it the current one
+  joblog                          print the session's workflow job log
+  stop [--all]                    end the session (or all of them) and wait until EAS confirms it ended
+
+Sessions:
+  Each start begins a new session and makes it the current one. The other commands use the current
+  session. To use another, add --session <id> (or -s <id>) before the command's arguments, or set
+  EXPO_DEVBOX_SESSION=<id>. Any unique prefix of an ID works; expo-devbox sessions lists them.
 
 On the worker:
   After each change, run expo-devbox sync, then the commands below with expo-devbox ssh '<command>'.
@@ -41,8 +49,8 @@ On the worker:
   If it crashed, the exception and crashing frames from the newest crash report:
     tail -n +2 "$(ls -t ~/Library/Logs/DiagnosticReports/$DEVBOX_EXECUTABLE*.ips | head -1)" | jq "{exception, termination, frames: [.threads[] | select(.triggered) | .frames[:12][] | {symbol, sourceFile, sourceLine}]}"
 
-  Screenshot (then, on your machine: scp -F .devbox/ssh_config devbox:.devbox/screenshot.png .devbox/):
-    xcrun simctl io booted screenshot ~/.devbox/screenshot.png
+  Screenshot. Then copy it to your machine with: expo-devbox pull .devbox/screenshot.png .devbox/
+    mkdir -p .devbox && xcrun simctl io booted screenshot .devbox/screenshot.png
 
   After adding or removing native files, or editing a podspec:
     cd ios && pod install
@@ -54,9 +62,12 @@ On the worker:
 Requires a logged-in eas-cli and cloudflared (brew install cloudflared).
 Docs: https://www.npmjs.com/package/expo-devbox`;
 
-const commands: Record<string, (args: string[]) => unknown> = { init, start, sync, ssh: shell, attach, joblog, stop };
+const commands: Record<string, (args: string[]) => unknown> = {
+  init, start, sync, ssh: shell, pull, sessions, attach, joblog, stop,
+};
 
-const [name, ...args] = process.argv.slice(2);
+const { command: name, args, session } = parseArgs(process.argv.slice(2));
+selectSession(session ?? process.env.EXPO_DEVBOX_SESSION);
 if (!name || name === 'help' || name === '--help' || name === '-h') {
   if (process.stdout.isTTY) await playIntro();
   console.log(HELP);

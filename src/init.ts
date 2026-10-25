@@ -15,7 +15,8 @@ When the user asks for it:
 1. Run \`bunx expo-devbox help\` and follow its "On the worker" section. It has the command for each step: build, install and launch, logs, crash reports and screenshots.
 2. Start a session with \`bunx expo-devbox start\`. It returns when the worker is ready, and EAS macOS minutes are billed until the session ends.
 3. After each change, run \`bunx expo-devbox sync\`, then the commands from the help with \`bunx expo-devbox ssh '<command>'\`.
-4. When the user is done with the devbox, run \`bunx expo-devbox stop\`.
+4. Commands use the session you started last in this directory. If another agent works in the same directory, pass your session's ID, which \`start\` prints, to every command: \`bunx expo-devbox ssh --session <id> '<command>'\`.
+5. When the user is done with the devbox, run \`bunx expo-devbox stop\`.
 `;
 
 export function init(args: string[]) {
